@@ -8,7 +8,7 @@ import (
 
 func GetOrders(c echo.Context) error {
 	userId := c.Get("userId").(uint64)
-	orders, err := getUserOrders(c.Request().Context(), userId)
+	orders, err := getUserOrders(userId)
 	if err != nil {
 		return err
 	}

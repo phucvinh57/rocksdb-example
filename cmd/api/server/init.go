@@ -4,7 +4,6 @@ import (
 	"os"
 	"trading-bsx/internal/middleware"
 	"trading-bsx/internal/trade"
-	"trading-bsx/pkg/db/mongodb"
 	"trading-bsx/pkg/db/rocksdb"
 	"trading-bsx/pkg/utils"
 
@@ -27,7 +26,6 @@ func New() *echo.Echo {
 	})
 
 	rocksdb.Init()
-	mongodb.Init()
 
 	e := echo.New()
 	e.HTTPErrorHandler = utils.HttpErrorHandler

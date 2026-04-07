@@ -1,8 +1,6 @@
 package engine_test
 
 import (
-	"net/http"
-	"strings"
 	"testing"
 	"time"
 	"trading-bsx/cmd/api/server"
@@ -20,40 +18,26 @@ func Test_ExpiredOrder_ShouldNotMatch(t *testing.T) {
 	client := testutil.NewClient(s)
 	client.SetUser(1)
 	var gtt uint64 = 10
-	client.Request(&testutil.RequestOption{
-		Method: http.MethodPost,
-		URL:    "/orders",
-		Body: trade.CreateOrder{
-			Type:  models.SELL,
-			Price: 100.0,
-			GTT:   &gtt,
-		},
+	placeOrder(t, client, trade.CreateOrder{
+		Type:   models.SELL,
+		Price:  100.0,
+		Volume: 5,
+		GTT:    &gtt,
 	})
 
 	client.SetUser(2)
 	time.Sleep(time.Duration(gtt) * time.Millisecond)
-	res := client.Request(&testutil.RequestOption{
-		Method: http.MethodPost,
-		URL:    "/orders",
-		Body: trade.CreateOrder{
-			Type:  models.BUY,
-			Price: 101.0,
-		},
+	resp := placeOrder(t, client, trade.CreateOrder{
+		Type:   models.BUY,
+		Price:  101.0,
+		Volume: 4,
 	})
 
-	// Check order unmatched
-	assert.Equal(t, http.StatusOK, res.Code)
-	orderId := res.Body.String()
-	assert.Len(t, orderId, 24)
+	assert.Equal(t, uint64(0), resp.FilledVolume)
+	assert.Equal(t, uint64(4), resp.RemainingVolume)
+	requireValidOrderKey(t, resp.OpenOrderKey)
 
-	// Check total number of orders. User 1's order is expired, so num of his orders should be 0
 	client.SetUser(1)
-	res = client.Request(&testutil.RequestOption{
-		Method: http.MethodGet,
-		URL:    "/orders",
-	})
-	assert.Equal(t, http.StatusOK, res.Code)
-	payload := res.Body.String()
-	payload = strings.Trim(payload, "\n")
-	assert.Equal(t, "[]", payload)
+	orders := getOrders(t, client)
+	assert.Empty(t, orders)
 }

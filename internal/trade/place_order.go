@@ -15,10 +15,29 @@ import (
 )
 
 type CreateOrder struct {
-	Type  models.OrderType `json:"type" validate:"required,oneof=BUY SELL"`
-	Price float64          `json:"price" validate:"required,gt=0"`
+	Type   models.OrderType `json:"type" validate:"required,oneof=BUY SELL"`
+	Price  float64          `json:"price" validate:"required,gt=0"`
+	Volume uint64           `json:"volume" validate:"required,gt=0"`
 	// Good till time, in milliseconds
 	GTT *uint64 `json:"gtt,omitempty" validate:"omitempty,gt=0"`
+}
+
+type TradeFill struct {
+	OrderKey  string  `json:"orderKey"`
+	UserId    uint64  `json:"userId"`
+	Price     float64 `json:"price"`
+	Volume    uint64  `json:"volume"`
+	Timestamp uint64  `json:"timestamp"`
+}
+
+type PlaceOrderResponse struct {
+	Type            models.OrderType `json:"type"`
+	Price           float64          `json:"price"`
+	RequestedVolume uint64           `json:"requestedVolume"`
+	FilledVolume    uint64           `json:"filledVolume"`
+	RemainingVolume uint64           `json:"remainingVolume"`
+	Fills           []TradeFill      `json:"fills"`
+	OpenOrderKey    string           `json:"openOrderKey,omitempty"`
 }
 
 var mutex = sync.Mutex{}
@@ -30,15 +49,11 @@ func PlaceOrder(c echo.Context) error {
 		return err
 	}
 
-	var book *grocksdb.DB
-	var opponentBook *grocksdb.DB
-	var matchOrder *models.Order
-	var matchOrderKey []byte
-
 	order := models.Order{
 		UserId:    c.Get("userId").(uint64),
 		Type:      body.Type,
 		Price:     body.Price,
+		Volume:    body.Volume,
 		Timestamp: uint64(time.Now().UnixNano()),
 		ExpiredAt: nil,
 	}
@@ -47,119 +62,151 @@ func PlaceOrder(c echo.Context) error {
 		order.ExpiredAt = &tmp
 	}
 
+	response, err := placeOrder(order)
+	if err != nil {
+		return err
+	}
+
+	return c.JSON(http.StatusOK, response)
+}
+
+func placeOrder(order models.Order) (*PlaceOrderResponse, error) {
+	var book *grocksdb.DB
+	var opponentBook *grocksdb.DB
+
+	requestedVolume := order.Volume
+
 	mutex.Lock()
 	defer mutex.Unlock()
 
 	if order.Type == models.BUY {
 		book = rocksdb.BuyOrder
 		opponentBook = rocksdb.SellOrder
-		matchOrderKey, matchOrder = getMatchSellOrder(&order)
 	} else {
 		book = rocksdb.SellOrder
 		opponentBook = rocksdb.BuyOrder
-		matchOrderKey, matchOrder = getMatchBuyOrder(&order)
+	}
+
+	fills, err := matchOrder(&order, opponentBook)
+	if err != nil {
+		return nil, err
 	}
 
 	log.Info().Interface("order", order).Msg("Place order")
-	log.Info().Interface("matchOrder", matchOrder).Msg("Match order")
+	log.Info().Interface("fills", fills).Msg("Matched fills")
 
 	wo := grocksdb.NewDefaultWriteOptions()
 	defer wo.Destroy()
 
-	reqCtx := c.Request().Context()
-	if matchOrder != nil {
-		if err := opponentBook.Delete(wo, matchOrderKey); err != nil {
-			return err
-		}
-		deleteMirroredOrder(reqCtx, matchOrder.Key)
-		return c.JSON(http.StatusOK, matchOrder)
+	response := &PlaceOrderResponse{
+		Type:            order.Type,
+		Price:           order.Price,
+		RequestedVolume: requestedVolume,
+		FilledVolume:    requestedVolume - order.Volume,
+		RemainingVolume: order.Volume,
+		Fills:           fills,
 	}
 
-	orderKey, orderValue := order.ToKVBytes()
-	if err := book.Put(wo, orderKey, orderValue); err != nil {
-		return err
+	if order.Volume > 0 {
+		orderKey, orderValue := order.ToKVBytes()
+		if err := book.Put(wo, orderKey, orderValue); err != nil {
+			return nil, err
+		}
+		response.OpenOrderKey = order.Key
 	}
-	orderID, err := createOrderRecord(reqCtx, order)
-	if err != nil {
-		return err
-	}
-	return c.String(http.StatusOK, orderID)
+
+	return response, nil
 }
 
-func getMatchBuyOrder(order *models.Order) ([]byte, *models.Order) {
-	// Sell -> Get biggest buy order -> Seek from the last item in the list
+func matchOrder(order *models.Order, opponentBook *grocksdb.DB) ([]TradeFill, error) {
 	ro := grocksdb.NewDefaultReadOptions()
 	defer ro.Destroy()
-	it := rocksdb.BuyOrder.NewIterator(ro)
+	it := opponentBook.NewIterator(ro)
 	defer it.Close()
 
-	it.SeekToLast()
-	for it.Valid() {
-		k, v := it.Key().Data(), it.Value().Data()
-		matchOrder := models.Order{
-			Type: models.BUY,
-		}
-		matchOrder.ParseKV(k, v)
-		if matchOrder.UserId == order.UserId {
+	wo := grocksdb.NewDefaultWriteOptions()
+	defer wo.Destroy()
+
+	matchType := models.SELL
+	step := func(it *grocksdb.Iterator) {
+		it.Next()
+	}
+	if order.Type == models.SELL {
+		matchType = models.BUY
+		step = func(it *grocksdb.Iterator) {
 			it.Prev()
+		}
+		it.SeekToLast()
+	} else {
+		it.SeekToFirst()
+	}
+
+	fills := make([]TradeFill, 0)
+	for it.Valid() && order.Volume > 0 {
+		key := it.Key()
+		value := it.Value()
+		keyBytes := append([]byte(nil), key.Data()...)
+		valueBytes := append([]byte(nil), value.Data()...)
+		key.Free()
+		value.Free()
+
+		matchOrder := models.Order{Type: matchType}
+		matchOrder.ParseKV(keyBytes, valueBytes)
+		if matchOrder.UserId == order.UserId {
+			step(it)
 			continue
 		}
-		if matchOrder.ExpiredAt != nil && *matchOrder.ExpiredAt > 0 {
-			if uint64(time.Now().UnixNano()) > *matchOrder.ExpiredAt {
-				wo := grocksdb.NewDefaultWriteOptions()
-				defer wo.Destroy()
-				if err := rocksdb.BuyOrder.Delete(wo, k); err != nil {
-					fmt.Println(err)
-				}
-				it.Prev()
-				continue
+		if isOrderExpired(matchOrder, uint64(time.Now().UnixNano())) {
+			if err := opponentBook.Delete(wo, keyBytes); err != nil {
+				return nil, err
 			}
+			step(it)
+			continue
 		}
-		if matchOrder.Price >= order.Price {
-			return k, &matchOrder
+		if !pricesMatch(order, matchOrder) {
+			break
 		}
 
-		// The biggest buy order is smaller than the current order, so no need to continue
-		return nil, nil
+		fillVolume := order.Volume
+		if matchOrder.Volume < fillVolume {
+			fillVolume = matchOrder.Volume
+		}
+		fills = append(fills, TradeFill{
+			OrderKey:  matchOrder.Key,
+			UserId:    matchOrder.UserId,
+			Price:     matchOrder.Price,
+			Volume:    fillVolume,
+			Timestamp: matchOrder.Timestamp,
+		})
+		order.Volume -= fillVolume
+
+		if fillVolume == matchOrder.Volume {
+			if err := opponentBook.Delete(wo, keyBytes); err != nil {
+				return nil, err
+			}
+			step(it)
+			continue
+		}
+
+		matchOrder.Volume -= fillVolume
+		_, updatedValue := matchOrder.ToKVBytes()
+		if err := opponentBook.Put(wo, keyBytes, updatedValue); err != nil {
+			return nil, err
+		}
+		break
 	}
-	return nil, nil
+
+	if err := it.Err(); err != nil {
+		return nil, err
+	}
+
+	return fills, nil
 }
 
-func getMatchSellOrder(order *models.Order) ([]byte, *models.Order) {
-	// Buy -> Get smallest sell order -> Seek from the first item in the list
-	ro := grocksdb.NewDefaultReadOptions()
-	defer ro.Destroy()
-	it := rocksdb.SellOrder.NewIterator(ro)
-	defer it.Close()
-
-	it.SeekToFirst()
-	for it.Valid() {
-		k, v := it.Key().Data(), it.Value().Data()
-		matchOrder := models.Order{
-			Type: models.SELL,
-		}
-		matchOrder.ParseKV(k, v)
-		if matchOrder.UserId == order.UserId {
-			it.Next()
-			continue
-		}
-		if matchOrder.ExpiredAt != nil && *matchOrder.ExpiredAt > 0 {
-			if uint64(time.Now().UnixNano()) > *matchOrder.ExpiredAt {
-				wo := grocksdb.NewDefaultWriteOptions()
-				defer wo.Destroy()
-				if err := rocksdb.SellOrder.Delete(wo, k); err != nil {
-					fmt.Println(err)
-				}
-				it.Next()
-				continue
-			}
-		}
-		if matchOrder.Price <= order.Price {
-			return k, &matchOrder
-		}
-
-		// The smallest sell order is bigger than the current order, so no need to continue
-		return nil, nil
+func pricesMatch(incoming *models.Order, resting models.Order) bool {
+	if incoming.Type == models.BUY {
+		return resting.Price <= incoming.Price
 	}
-	return nil, nil
+
+	return resting.Price >= incoming.Price
 }

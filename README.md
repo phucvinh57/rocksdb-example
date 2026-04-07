@@ -4,8 +4,8 @@ Challenge description: <https://gist.github.com/bsx-engineering/b1f9b4d6f2fcd96e
 
 To be summarized, there are 3 APIs to be implemented:
 
-- `GET /orders`: Get user's orders. Returned result must not include expired & matched orders
-- `POST /orders`: Place a buy/sell order. Return a match order if exists. 
+- `GET /orders`: Get user's open orders. Returned result must not include expired or fully matched orders
+- `POST /orders`: Place a buy/sell order with a `volume`, match it against the book, and return a trade summary
 - `DELETE /orders/:id`: Cancel an order.
 
 ## Design
@@ -36,22 +36,15 @@ We will have 2 RocksDB instances: `BuyOrder` & `SellOrder`, which store buy & se
   - We store price by multiplying by 10^18 (Wei unit) to keep precision. A product of a `float64` and `10^18` must be stored with `64 + log2(10^18) ~= 123` bits => use 128 bits <=> 16 bytes.
   - Timestamp is Unix time in nanoseconds. It's a 64-bit integer, which is 8 bytes.
   - User ID is a 64-bit integer, which is 8 bytes.
-- Value: We don't need to restrict the value's size. It can store JSON, number, string, ... in bytes. In our case, we store the order's `good till time` (gtt).
+- Value has 16 bytes:
+  - 8 bytes for remaining `volume`
+  - 8 bytes for `expiredAt` in Unix nanoseconds, where `0` means no expiry
 
-Records in RocksDB are sorted by keys, in byte order. To get the highest buy order, we just pick the last record in `BuyOrder`. To get the lowest sell order, we just pick the first record in `SellOrder`. If the record has same user ID with new order, we can move to the next record. In case the record is expired, we can delete immediately.
+Records in RocksDB are sorted by keys, in byte order. To get the highest buy order, we pick the last record in `BuyOrder`. To get the lowest sell order, we pick the first record in `SellOrder`. Matching walks the opposite book in price-time order, skips self-matches, removes expired records lazily, and can consume multiple resting orders until the incoming order is fully filled or no more matchable orders remain.
 
-### Data replication
+### Reading user orders
 
-Our key & value design is only optimized for order matching, not for the feature get user's orders. In this feature, user ID is used as a key to get all orders of a user. If we store all orders in a single RocksDB instance, we must scan all records to get user's orders. This is not efficient.
-
-To solve this problem, we replicate order data into another database. In this challenge, MongoDB is chosen. We store user's orders in MongoDB with an index on user ID.
-
-There are 2 ways to replicate data:
-
-- Synchronous replication: After writing to RocksDB, we write to MongoDB. This way is slow and not safe because if writing to MongoDB fails, we must rollback the write to RocksDB.
-- Asynchronous replication: We write to RocksDB first, then push the write to a message queue. Kafka is a good choice for this. A consumer will consume message in batches and write to MongoDB. This way is faster and safer.
-
-Due to the time limit, we choose the synchronous replication.
+Our key design is optimized for matching, not for querying by user ID. Since the project now uses only RocksDB, `GET /orders` scans both books, filters by `userId`, and skips expired records in memory. This keeps the storage model simple and makes the whole service self-contained, with the tradeoff that user-order lookups are linear in the current book size.
 
 ## Implementation
 
@@ -60,35 +53,63 @@ Due to the time limit, we choose the synchronous replication.
 - Install C libraries: `sudo apt install librocksdb-dev libsnappy-dev libz-dev liblz4-dev libzstd-dev`
 - Install dependencies: `go mod download`
 
-### Storage modes
+### Runtime configuration
 
-By default, the app uses RocksDB for matching and MongoDB for the user-order index.
+The service only depends on RocksDB.
 
-- `MONGODB_ENABLED=true`: keep the current MongoDB-backed order index
-- `MONGODB_ENABLED=false` or `IGNORE_MONGODB=true`: disable MongoDB entirely
 - `ROCKSDB_IN_MEMORY=true`: run RocksDB with an in-memory environment instead of on-disk files
 
-Example: run fully in RAM without MongoDB
+Example: run fully in RAM
 
 ```bash
-MONGODB_ENABLED=false ROCKSDB_IN_MEMORY=true go test ./test/integration -run RocksOnly
+ROCKSDB_IN_MEMORY=true go test ./test/integration -run InMemory
 ```
 
-When MongoDB is disabled:
+`POST /orders` request body:
 
-- `POST /orders` returns the base32-encoded RocksDB key instead of a MongoDB ObjectID
-- `DELETE /orders/:id` accepts that returned key
-- `GET /orders` still works by scanning both RocksDB books and filtering by user ID
+```json
+{
+  "type": "BUY",
+  "price": 101.5,
+  "volume": 10,
+  "gtt": 1000
+}
+```
+
+`POST /orders` response body:
+
+```json
+{
+  "type": "BUY",
+  "price": 101.5,
+  "requestedVolume": 10,
+  "filledVolume": 7,
+  "remainingVolume": 3,
+  "fills": [
+    {
+      "orderKey": "BASE32KEY...",
+      "userId": 2,
+      "price": 100.0,
+      "volume": 7,
+      "timestamp": 1710000000000000000
+    }
+  ],
+  "openOrderKey": "BASE32KEY..."
+}
+```
+
+`GET /orders` returns open orders with remaining `volume`, and `DELETE /orders/:id` accepts the `openOrderKey`.
 
 ### Testing
 
 There are some provided test cases in `./test/integration`:
 
-- Rapid place orders & get orders. Number of orders of a user must equal to the number of orders placed by him.
-- Match buy orders: Place multiple buy orders, then place sell orders. Some buy orders match, some don't. Finally, check size of order book.
-- Match sell orders: Similar to match buy orders.
-- Cancel orders: Place orders, then cancel them. New order must not match canceled order. Finally, check size of order book.
-- Expire orders: Place orders, then wait until they expire. New order must not match expired order. Finally, check size of order book.
+- Rapid place orders and fetch remaining open orders
+- Full-fill and partial-fill matching on both sides of the book
+- Multi-fill matching across several resting orders in price-time order
+- Self-match skipping
+- Canceling the remaining volume of an open order
+- Expired orders being skipped and cleaned up during matching
 
 Run `make test` to run all test cases.
 
@@ -96,30 +117,28 @@ Run `make test` to run all test cases.
 
 Random 200 users, place orders rapidly, each order has a random price in range [100, 200]. 
 
-There are 2 benchmarks:
-- All users places only buy orders.
-- Users places random buy & sell orders.
+Current benchmark suite:
+- On-disk RocksDB, users place random buy & sell orders
+- In-memory RocksDB, users place random buy & sell orders
 
 Run `make benchmark` to run the benchmarks.
 
-Result:
+Result on this machine:
 
-```bash
-> go test -bench=. -benchmem -benchtime=10s ./test/bench
+- OS: Linux amd64
+- CPU: 13th Gen Intel(R) Core(TM) i7-13800H
+- Benchmarks were run separately:
+  - `go test ./test/bench -bench '^Benchmark_PlaceRandomBuyNSellOrders$' -benchmem -benchtime=10s`
+  - `go test ./test/bench -bench '^Benchmark_InMemoryPlaceRandomBuyNSellOrders$' -benchmem`
 
-goos: linux
-goarch: amd64
-pkg: trading-bsx/test/bench
-cpu: Intel(R) Core(TM) i5-7200U CPU @ 2.50GHz
-Benchmark_PlaceOnlyOneOrderType-4                  11304           1062627 ns/op           13044 B/op        109 allocs/op
-Benchmark_PlaceRandomBuyNSellOrders-4               6254           2256801 ns/op           13356 B/op        119 allocs/op
-PASS
-ok      trading-bsx/test/bench  33.654s
-```
+| Benchmark | ns/op | Time per tx | Approx tx/s | B/op | allocs/op |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `Benchmark_PlaceRandomBuyNSellOrders` | 447,782 | 447.78 µs | 2,233 | 9,077 | 64 |
+| `Benchmark_InMemoryPlaceRandomBuyNSellOrders` | 189,905 | 189.90 µs | 5,266 | 9,078 | 64 |
 
-In the first benchmark, each order is placed in `1.06ms`. In the second benchmark, each order is placed in `2.25ms`.
+`Approx tx/s` is calculated as `1e9 / ns_op`.
 
 ## Future development
 
-- Use Kafka for asynchronous replication.
-- Add quantity (volume) attribute to orders.
+- Optimize the mixed-order matching path further.
+- Add a trade history endpoint if executed fills need to be queried later.

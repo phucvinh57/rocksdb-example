@@ -22,7 +22,7 @@ func CancelOrder(c echo.Context) error {
 	}
 	userId := c.Get("userId").(uint64)
 
-	order, book, orderKey, err := cancelOrderRecord(c.Request().Context(), userId, req.OrderId)
+	order, book, orderKey, err := cancelOrderRecord(userId, req.OrderId)
 	if err != nil {
 		return err
 	}

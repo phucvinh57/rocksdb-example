@@ -1,8 +1,6 @@
 package engine_test
 
 import (
-	"encoding/json"
-	"net/http"
 	"testing"
 	"trading-bsx/cmd/api/server"
 	"trading-bsx/internal/trade"
@@ -23,25 +21,21 @@ func Test_PlaceOrders(t *testing.T) {
 	for _, price := range prices {
 		for j := 1; j <= 2; j++ {
 			client.SetUser(uint64(j))
-			res := client.Request(&testutil.RequestOption{
-				Method: http.MethodPost,
-				URL:    "/orders",
-				Body: trade.CreateOrder{
-					Type:  models.BUY,
-					Price: price,
-				},
+			resp := placeOrder(t, client, trade.CreateOrder{
+				Type:   models.BUY,
+				Price:  price,
+				Volume: 2,
 			})
-			assert.Equal(t, http.StatusOK, res.Code)
+			assert.Equal(t, uint64(0), resp.FilledVolume)
+			assert.Equal(t, uint64(2), resp.RemainingVolume)
+			requireValidOrderKey(t, resp.OpenOrderKey)
 		}
 	}
 
 	client.SetUser(1)
-	res := client.Request(&testutil.RequestOption{
-		Method: http.MethodGet,
-		URL:    "/orders",
-	})
-	var orders = make([]models.Order, 0)
-	json.NewDecoder(res.Body).Decode(&orders)
-	assert.Equal(t, http.StatusOK, res.Code)
+	orders := getOrders(t, client)
 	assert.Len(t, orders, len(prices))
+	for _, order := range orders {
+		assert.Equal(t, uint64(2), order.Volume)
+	}
 }

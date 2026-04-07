@@ -10,26 +10,6 @@ import (
 	"trading-bsx/pkg/testutil"
 )
 
-func Benchmark_PlaceOnlyOneOrderType(b *testing.B) {
-	const minPrice = 100.0
-	const maxPrice = 200.0
-
-	client := newBenchmarkClient(b, false)
-
-	for j := 0; j < b.N; j++ {
-		client.SetUser(rand.Uint64N(200))
-		price := minPrice + rand.Float64()*(maxPrice-minPrice)
-		client.Request(&testutil.RequestOption{
-			Method: http.MethodPost,
-			URL:    "/orders",
-			Body: trade.CreateOrder{
-				Type:  models.BUY,
-				Price: price,
-			},
-		})
-	}
-}
-
 func Benchmark_PlaceRandomBuyNSellOrders(b *testing.B) {
 	const minPrice = 100.0
 	const maxPrice = 200.0
@@ -50,34 +30,15 @@ func Benchmark_PlaceRandomBuyNSellOrders(b *testing.B) {
 			Method: http.MethodPost,
 			URL:    "/orders",
 			Body: trade.CreateOrder{
-				Type:  orderType,
-				Price: price,
+				Type:   orderType,
+				Price:  price,
+				Volume: 1,
 			},
 		})
 	}
 }
 
-func Benchmark_RocksOnlyPlaceOnlyOneOrderType(b *testing.B) {
-	const minPrice = 100.0
-	const maxPrice = 200.0
-
-	client := newBenchmarkClient(b, true)
-
-	for j := 0; j < b.N; j++ {
-		client.SetUser(rand.Uint64N(200))
-		price := minPrice + rand.Float64()*(maxPrice-minPrice)
-		client.Request(&testutil.RequestOption{
-			Method: http.MethodPost,
-			URL:    "/orders",
-			Body: trade.CreateOrder{
-				Type:  models.BUY,
-				Price: price,
-			},
-		})
-	}
-}
-
-func Benchmark_RocksOnlyPlaceRandomBuyNSellOrders(b *testing.B) {
+func Benchmark_InMemoryPlaceRandomBuyNSellOrders(b *testing.B) {
 	const minPrice = 100.0
 	const maxPrice = 200.0
 
@@ -97,18 +58,18 @@ func Benchmark_RocksOnlyPlaceRandomBuyNSellOrders(b *testing.B) {
 			Method: http.MethodPost,
 			URL:    "/orders",
 			Body: trade.CreateOrder{
-				Type:  orderType,
-				Price: price,
+				Type:   orderType,
+				Price:  price,
+				Volume: 1,
 			},
 		})
 	}
 }
 
-func newBenchmarkClient(b *testing.B, rocksOnly bool) *testutil.Client {
+func newBenchmarkClient(b *testing.B, inMemory bool) *testutil.Client {
 	b.Helper()
 	b.Setenv("ENV", "test")
-	if rocksOnly {
-		b.Setenv("MONGODB_ENABLED", "false")
+	if inMemory {
 		b.Setenv("ROCKSDB_IN_MEMORY", "true")
 	}
 

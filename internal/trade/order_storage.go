@@ -1,48 +1,18 @@
 package trade
 
 import (
-	"context"
 	"encoding/base32"
 	"net/http"
 	"sort"
 	"time"
-	"trading-bsx/pkg/config"
 	"trading-bsx/pkg/db/models"
-	"trading-bsx/pkg/db/mongodb"
 	"trading-bsx/pkg/db/rocksdb"
 
 	"github.com/labstack/echo/v4"
 	"github.com/linxGnu/grocksdb"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-func createOrderRecord(ctx context.Context, order models.Order) (string, error) {
-	if !config.MongoEnabled() {
-		return order.Key, nil
-	}
-
-	result, err := mongodb.Order.InsertOne(ctx, order)
-	if err != nil {
-		return "", err
-	}
-
-	return result.InsertedID.(primitive.ObjectID).Hex(), nil
-}
-
-func deleteMirroredOrder(ctx context.Context, key string) {
-	if !config.MongoEnabled() {
-		return
-	}
-
-	mongodb.Order.DeleteOne(ctx, bson.M{"key": key})
-}
-
-func getUserOrders(ctx context.Context, userId uint64) ([]models.Order, error) {
-	if config.MongoEnabled() {
-		return getUserOrdersFromMongo(ctx, userId)
-	}
-
+func getUserOrders(userId uint64) ([]models.Order, error) {
 	mutex.Lock()
 	defer mutex.Unlock()
 
@@ -64,34 +34,6 @@ func getUserOrders(ctx context.Context, userId uint64) ([]models.Order, error) {
 	sort.Slice(orders, func(i, j int) bool {
 		return orders[i].Timestamp < orders[j].Timestamp
 	})
-
-	return orders, nil
-}
-
-func getUserOrdersFromMongo(ctx context.Context, userId uint64) ([]models.Order, error) {
-	orders := make([]models.Order, 0)
-	ts := uint64(time.Now().UnixNano())
-	filter := bson.M{
-		"$and": []bson.M{
-			{"user_id": userId},
-			{
-				"$or": []bson.M{
-					{"expired_at": bson.M{"$gte": ts}},
-					{"expired_at": 0},
-					{"expired_at": bson.M{"$exists": false}},
-				},
-			},
-		},
-	}
-	cursor, err := mongodb.Order.Find(ctx, filter)
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close(ctx)
-
-	if err := cursor.All(ctx, &orders); err != nil {
-		return nil, err
-	}
 
 	return orders, nil
 }
@@ -120,7 +62,7 @@ func getUserOrdersFromBook(book *grocksdb.DB, orderType models.OrderType, userId
 		if order.UserId != userId {
 			continue
 		}
-		if order.ExpiredAt != nil && *order.ExpiredAt > 0 && now > *order.ExpiredAt {
+		if isOrderExpired(order, now) {
 			continue
 		}
 
@@ -130,34 +72,8 @@ func getUserOrdersFromBook(book *grocksdb.DB, orderType models.OrderType, userId
 	return orders, it.Err()
 }
 
-func cancelOrderRecord(ctx context.Context, userId uint64, orderID string) (*models.Order, *grocksdb.DB, []byte, error) {
-	if config.MongoEnabled() {
-		return cancelMongoOrder(ctx, userId, orderID)
-	}
-
+func cancelOrderRecord(userId uint64, orderID string) (*models.Order, *grocksdb.DB, []byte, error) {
 	return cancelRocksOrder(userId, orderID)
-}
-
-func cancelMongoOrder(ctx context.Context, userId uint64, orderID string) (*models.Order, *grocksdb.DB, []byte, error) {
-	objectID, err := primitive.ObjectIDFromHex(orderID)
-	if err != nil {
-		return nil, nil, nil, echo.NewHTTPError(http.StatusBadRequest, "Invalid order id")
-	}
-
-	order := models.Order{}
-	if err := mongodb.Order.FindOneAndDelete(ctx, bson.M{
-		"_id":     objectID,
-		"user_id": userId,
-	}).Decode(&order); err != nil {
-		return nil, nil, nil, err
-	}
-
-	orderKey, err := base32.StdEncoding.DecodeString(order.Key)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-
-	return &order, getBookByType(order.Type), orderKey, nil
 }
 
 func cancelRocksOrder(userId uint64, orderID string) (*models.Order, *grocksdb.DB, []byte, error) {
@@ -189,7 +105,7 @@ func cancelRocksOrder(userId uint64, orderID string) (*models.Order, *grocksdb.D
 		if order.UserId != userId {
 			return nil, nil, nil, echo.NewHTTPError(http.StatusNotFound, "Resource not found")
 		}
-		if order.ExpiredAt != nil && *order.ExpiredAt > 0 && uint64(time.Now().UnixNano()) > *order.ExpiredAt {
+		if isOrderExpired(order, uint64(time.Now().UnixNano())) {
 			return nil, nil, nil, echo.NewHTTPError(http.StatusNotFound, "Resource not found")
 		}
 
@@ -205,4 +121,8 @@ func getBookByType(orderType models.OrderType) *grocksdb.DB {
 	}
 
 	return rocksdb.SellOrder
+}
+
+func isOrderExpired(order models.Order, now uint64) bool {
+	return order.ExpiredAt != nil && *order.ExpiredAt > 0 && now > *order.ExpiredAt
 }

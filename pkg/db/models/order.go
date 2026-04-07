@@ -4,8 +4,6 @@ import (
 	"encoding/base32"
 	"encoding/binary"
 	"math/big"
-
-	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type OrderType string
@@ -16,13 +14,13 @@ const (
 )
 
 type Order struct {
-	ID        *primitive.ObjectID `json:"id,omitempty" bson:"_id,omitempty"`
-	UserId    uint64              `json:"userId" bson:"user_id"`
-	Type      OrderType           `json:"type" bson:"type"`
-	Price     float64             `json:"price" bson:"price"`
-	ExpiredAt *uint64             `json:"expiredAt,omitempty" bson:"expired_at,omitempty"`
-	Timestamp uint64              `json:"timestamp,omitempty" bson:"timestamp,omitempty"`
-	Key       string              `json:"key,omitempty" bson:"key,omitempty"`
+	UserId    uint64    `json:"userId"`
+	Type      OrderType `json:"type"`
+	Price     float64   `json:"price"`
+	Volume    uint64    `json:"volume"`
+	ExpiredAt *uint64   `json:"expiredAt,omitempty"`
+	Timestamp uint64    `json:"timestamp,omitempty"`
+	Key       string    `json:"key,omitempty"`
 }
 
 func (order *Order) ParseKV(key []byte, value []byte) {
@@ -38,9 +36,15 @@ func (order *Order) ParseKV(key []byte, value []byte) {
 	order.Timestamp = ts
 	order.UserId = binary.BigEndian.Uint64(key[24:32])
 
-	if len(value) > 0 {
-		exp := binary.BigEndian.Uint64(value)
+	if len(value) >= 8 {
+		order.Volume = binary.BigEndian.Uint64(value[:8])
+	}
+	if len(value) >= 16 {
+		exp := binary.BigEndian.Uint64(value[8:16])
 		order.ExpiredAt = &exp
+	}
+	if order.ExpiredAt != nil && *order.ExpiredAt == 0 {
+		order.ExpiredAt = nil
 	}
 
 	order.Key = base32.StdEncoding.EncodeToString(key)
@@ -68,9 +72,10 @@ func (order *Order) ToKVBytes() ([]byte, []byte) {
 	binary.BigEndian.PutUint64(userIdBytes, order.UserId)
 	copy(key[24:32], userIdBytes)
 
-	value := make([]byte, 8)
+	value := make([]byte, 16)
+	binary.BigEndian.PutUint64(value[:8], order.Volume)
 	if order.ExpiredAt != nil {
-		binary.BigEndian.PutUint64(value, *order.ExpiredAt)
+		binary.BigEndian.PutUint64(value[8:16], *order.ExpiredAt)
 	}
 	order.Key = base32.StdEncoding.EncodeToString(key)
 	return key, value
