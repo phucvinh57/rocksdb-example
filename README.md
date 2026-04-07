@@ -1,12 +1,41 @@
 # BSX trading challenge
 
-Challenge description: <https://gist.github.com/bsx-engineering/b1f9b4d6f2fcd96e065953584c113b8c>
+## Description
 
-To be summarized, there are 3 APIs to be implemented:
+You operate a marketplace for buying & selling used textbooks. For a given textbook, e.g. "Theory of Cryptography," there are people who want to buy this textbook and people who want to sell.
+-  Offers to BUY: $100, $100, $99, $99, $97, $90
+-  Offers to SELL: $109, $110, $110, $114, $115, $119
 
-- `GET /orders`: Get user's open orders. Returned result must not include expired or fully matched orders
-- `POST /orders`: Place a buy/sell order with a `volume`, match it against the book, and return a trade summary
-- `DELETE /orders/:id`: Cancel an order.
+A match occurs when two people agree on a price. Some new offers do not match. These offers should be added to the active set of offers. For example:
+
+Tim offers to SELL at $150. No one is willing to buy at that price so we save the offer.
+-  Offers to SELL:: $109, $110, $110, $114, $115, $119, $150
+
+When matching we want to give the customer the "best price". Example matches:
+
+If Jane offers to BUY at $120, she will match and buy a book for $109 (the lowest offer to sell is the best price). The sell offers should be updated to reflect the match
+- Offers to SELL: $110, $110, $114, $115, $119, $150
+
+If Connie offers to SELL at $99 she will match and sell her book for $100 (the highest offer to buy is the best price). The buy offers should be updated to reflect the match
+- Offers to BUY: $100, $99, $99, $97, $90
+
+**Task**: Write the program to allow user to submit buy and sell order. The basic version of this system will need to:
+- Accept incoming offers to buy & sell
+    - Output if the price matches
+- Keep an updated lists of buys & sells
+
+
+### Time Triggers
+Some customers would like their offers to expire. When orders are placed allow customers to specify an optional GTT (Good Til Time). If the offer is not matched before the GTT, the offer is deleted from the order book. Customer A could offer to buy at $90 with a GTT of one hour from now. If Customer B offers to sell at $90 before one hour has passed the order should be matched. If Customer B offers to sell at $90 2 hours later, the old order will be gone.
+
+
+### Customer ID
+To really match a buyer and a seller you would need to keep track of which offers belong to which customer. Extend your implementation to track the customer id. The customer who placed the order first should be prefered. 
+**A customer should not be able to sell a book to themselves.**
+
+Extend your implementation to allow a user to cancel their order. If a user cancels their order, the order should be removed from the order book.
+
+Add a function to allow a user to query all their existing orders. This should return a list of all their orders that have not been matched or canceled.
 
 ## Design
 
