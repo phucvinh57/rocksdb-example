@@ -60,6 +60,26 @@ Due to the time limit, we choose the synchronous replication.
 - Install C libraries: `sudo apt install librocksdb-dev libsnappy-dev libz-dev liblz4-dev libzstd-dev`
 - Install dependencies: `go mod download`
 
+### Storage modes
+
+By default, the app uses RocksDB for matching and MongoDB for the user-order index.
+
+- `MONGODB_ENABLED=true`: keep the current MongoDB-backed order index
+- `MONGODB_ENABLED=false` or `IGNORE_MONGODB=true`: disable MongoDB entirely
+- `ROCKSDB_IN_MEMORY=true`: run RocksDB with an in-memory environment instead of on-disk files
+
+Example: run fully in RAM without MongoDB
+
+```bash
+MONGODB_ENABLED=false ROCKSDB_IN_MEMORY=true go test ./test/integration -run RocksOnly
+```
+
+When MongoDB is disabled:
+
+- `POST /orders` returns the base32-encoded RocksDB key instead of a MongoDB ObjectID
+- `DELETE /orders/:id` accepts that returned key
+- `GET /orders` still works by scanning both RocksDB books and filtering by user ID
+
 ### Testing
 
 There are some provided test cases in `./test/integration`:

@@ -9,8 +9,8 @@ import (
 )
 
 type ErrResponse struct {
-	Message  string      `json:"message"`
-	Metadata interface{} `json:"metadata,omitempty"`
+	Message  string `json:"message"`
+	Metadata any    `json:"metadata,omitempty"`
 }
 
 func HttpErrorHandler(err error, c echo.Context) {

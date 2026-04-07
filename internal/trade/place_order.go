@@ -6,15 +6,12 @@ import (
 	"sync"
 	"time"
 	"trading-bsx/pkg/db/models"
-	"trading-bsx/pkg/db/mongodb"
 	"trading-bsx/pkg/db/rocksdb"
 	"trading-bsx/pkg/utils"
 
 	"github.com/labstack/echo/v4"
 	"github.com/linxGnu/grocksdb"
 	"github.com/rs/zerolog/log"
-	"go.mongodb.org/mongo-driver/bson"
-	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type CreateOrder struct {
@@ -74,7 +71,7 @@ func PlaceOrder(c echo.Context) error {
 		if err := opponentBook.Delete(wo, matchOrderKey); err != nil {
 			return err
 		}
-		mongodb.Order.DeleteOne(reqCtx, bson.M{"key": matchOrder.Key})
+		deleteMirroredOrder(reqCtx, matchOrder.Key)
 		return c.JSON(http.StatusOK, matchOrder)
 	}
 
@@ -82,11 +79,11 @@ func PlaceOrder(c echo.Context) error {
 	if err := book.Put(wo, orderKey, orderValue); err != nil {
 		return err
 	}
-	result, err := mongodb.Order.InsertOne(reqCtx, order)
+	orderID, err := createOrderRecord(reqCtx, order)
 	if err != nil {
 		return err
 	}
-	return c.String(http.StatusOK, result.InsertedID.(primitive.ObjectID).Hex())
+	return c.String(http.StatusOK, orderID)
 }
 
 func getMatchBuyOrder(order *models.Order) ([]byte, *models.Order) {

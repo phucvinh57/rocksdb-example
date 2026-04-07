@@ -84,15 +84,15 @@ func NewValidator() *CustomValidator {
 }
 
 type ValidationError struct {
-	Message  string                 `json:"message"`
-	Metadata map[string]interface{} `json:"metadata"`
+	Message  string         `json:"message"`
+	Metadata map[string]any `json:"metadata"`
 }
 
 func (ve ValidationError) Error() string {
 	return ve.Message
 }
 
-func (cv *CustomValidator) Validate(i interface{}) error {
+func (cv *CustomValidator) Validate(i any) error {
 	if err := cv.validator.Struct(i); err != nil {
 		validateErrs, ok := err.(validator.ValidationErrors)
 		if !ok {
@@ -103,7 +103,7 @@ func (cv *CustomValidator) Validate(i interface{}) error {
 
 		validationErr := &ValidationError{
 			Message: errMsg,
-			Metadata: map[string]interface{}{
+			Metadata: map[string]any{
 				"field":     firstErr.Field(),
 				"namespace": firstErr.Namespace(),
 				"type":      firstErr.Type().String(),
@@ -237,7 +237,7 @@ func pascalCaseToWords(s string) string {
 	return string(words)
 }
 
-func BindNValidate(c echo.Context, i interface{}) error {
+func BindNValidate(c echo.Context, i any) error {
 	if err := c.Bind(i); err != nil {
 		return echo.NewHTTPError(http.StatusBadRequest, err.Error())
 	}

@@ -12,7 +12,7 @@ import (
 type RequestOption struct {
 	Method      string
 	URL         string
-	Body        interface{}
+	Body        any
 	ContentType string
 }
 
