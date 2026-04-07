@@ -1,4 +1,4 @@
-# BSX trading challenge
+# Trading example with RocksDB
 
 ## Description
 
